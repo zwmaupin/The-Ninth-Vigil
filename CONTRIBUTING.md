@@ -98,6 +98,50 @@ So for any change that claims to alter what the player sees:
 
 If the defect is still visible in the after crop, you are not done.
 
+### The machine does the comparing, so you do not have to
+
+Steps 1-5 are the manual version, and the tool that automates them is
+`tools/diff.mjs`:
+
+```bash
+node tools/diff.mjs --scenario=combat        # capture, compare to the baseline, report
+node tools/diff.mjs --scenario=combat --json # the same, machine-readable
+```
+
+The repository already ships the "before" — the committed PNGs in `shots/` — and
+this compares a fresh capture against them. It reports:
+
+- the share of pixels that changed, and the share that changed a lot
+- a **diff PNG** in `shots/_debug/diff/`, unchanged pixels dimmed to a ghost and
+  changed pixels lit red (brighter) or blue (darker), so you can see the
+  *direction* of a change and not just that one happened
+- which objective metrics moved, and by how much
+- which metrics **crossed out of range**, which is what fails the build
+
+CI runs it on every PR. A frame that moved a lot, or a frame whose metrics left
+the documented range, fails the job and uploads the diff image for a human to
+look at.
+
+Two things it deliberately does NOT do, because both were tried and both were
+worse:
+
+- **It does not require the frame to be IDENTICAL to the baseline.** A renderer
+  that changes by a legitimate amount — a new light, a re-tuned grade — is
+  doing its job, and a gate that failed on any difference would be a gate that
+  gets disabled.
+- **It does not store a hash.** The README records the objection to a stored
+  hash — "a stored hash would mostly generate 'just update the expected value'
+  commits" — and the objection is sound, because a hash destroys the information
+  a reviewer needs. A diff keeps it: "the torch moved and the frost is gone"
+  and "everything is subtly wrong" are visibly different, and a hash collapses
+  them into the same opaque string.
+
+`node tools/sheet.mjs --check` is the other half: it runs the objective
+value/colour analysis over every capture and **exits non-zero** if any frame
+is out of range. The thresholds live in `tools/frame-metrics.mjs`, which both
+tools import, so the two cannot drift apart.
+
+
 ### Verify on the live path, not just the harness
 
 `tools/shot.mjs` loads `?shot=X`, so `Terrain.init()` reads the query parameter

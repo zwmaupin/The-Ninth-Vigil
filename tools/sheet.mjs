@@ -4,17 +4,31 @@
  *
  *   node tools/sheet.mjs                 # tile shots/*.png into shots/_sheet.png
  *   node tools/sheet.mjs --analyze       # also print objective frame statistics
+ *   node tools/sheet.mjs --check         # analyze, and FAIL if any frame is out of range
  *
  * The analysis catches the failures a language model reviewing a PNG can miss:
  * lifted blacks, no true highlights, low contrast, oversaturation, dead frames.
+ *
+ * The thresholds and the metric definitions live in `tools/frame-metrics.mjs`,
+ * which `tools/diff.mjs` imports too. One copy, so the two tools cannot drift
+ * apart — the project has already paid for that lesson once, with four
+ * modules each keeping their own copy of a grade constant that had moved.
  */
 import { chromium } from 'playwright';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
+import { computeMetrics, evaluateMetrics, formatMetricsLine } from './frame-metrics.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const SHOTS = resolve(ROOT, 'shots');
 const analyze = process.argv.includes('--analyze');
+/* --check makes the analysis a GATE: it exits non-zero when any frame is out
+   of range, so `npm run check` can fail a build rather than just report.
+   The default stays a report, because a tool that fails on every pre-existing
+   warning is a tool nobody runs. */
+const check = process.argv.includes('--check');
+if (check) { /* --check implies --analyze */ }
+const doAnalyze = analyze || check;
 
 const files = readdirSync(SHOTS)
   .filter((f) => f.endsWith('.png') && !f.startsWith('_'))
@@ -56,8 +70,9 @@ await page.setContent(html, { waitUntil: 'load' });
 mkdirSync(SHOTS, { recursive: true });
 await page.screenshot({ path: resolve(SHOTS, '_sheet.png') });
 
-if (analyze) {
+if (doAnalyze) {
   console.log('\nFRAME ANALYSIS (objective — catches what the eye rationalizes away)\n');
+  let outOfRange = 0;
   for (const i of imgs) {
     const stats = await page.evaluate(async (src) => {
       const img = new Image();
@@ -66,59 +81,25 @@ if (analyze) {
       const c = new OffscreenCanvas(img.width, img.height);
       const x = c.getContext('2d');
       x.drawImage(img, 0, 0);
-      const d = x.getImageData(0, 0, img.width, img.height).data;
-      const hist = new Array(32).fill(0);
-      let sum = 0, n = 0, satSum = 0, dark = 0, blown = 0;
-      let uniq = new Set();
-      for (let p = 0; p < d.length; p += 16) {
-        const r = d[p] / 255, g = d[p + 1] / 255, b = d[p + 2] / 255;
-        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-        satSum += mx === 0 ? 0 : (mx - mn) / mx;
-        hist[Math.min(31, (l * 32) | 0)]++;
-        sum += l; n++;
-        if (l < 0.02) dark++;
-        if (l > 0.96) blown++;
-        if (n % 37 === 0) uniq.add((d[p] >> 4) + ',' + (d[p + 1] >> 4) + ',' + (d[p + 2] >> 4));
-      }
-      const mean = sum / n;
-      let varSum = 0;
-      for (let k = 0; k < 32; k++) varSum += hist[k] * Math.pow(k / 32 - mean, 2);
-      const p = (frac) => {
-        let acc = 0;
-        for (let k = 0; k < 32; k++) { acc += hist[k]; if (acc / n >= frac) return k / 32; }
-        return 1;
-      };
-      return {
-        mean: +mean.toFixed(3),
-        stdev: +Math.sqrt(varSum / n).toFixed(3),
-        p01: +p(0.01).toFixed(3), p50: +p(0.5).toFixed(3), p99: +p(0.99).toFixed(3),
-        trueBlackPct: +((dark / n) * 100).toFixed(1),
-        blownPct: +((blown / n) * 100).toFixed(2),
-        meanSat: +(satSum / n).toFixed(3),
-        colorBuckets: uniq.size,
-      };
+      return x.getImageData(0, 0, img.width, img.height);
     }, i.data);
 
-    const warn = [];
-    if (stats.p01 > 0.06) warn.push('LIFTED BLACKS — no true black, frame reads milky');
-    if (stats.p99 < 0.72) warn.push('NO HIGHLIGHTS — nothing bright, frame reads flat/dull');
-    if (stats.stdev < 0.13) warn.push('LOW CONTRAST — value range too compressed');
-    if (stats.mean > 0.5) warn.push('TOO BRIGHT for the Diablo look (target mean 0.16-0.34)');
-    if (stats.mean < 0.05) warn.push('NEARLY BLACK — likely a rendering failure');
-    if (stats.blownPct > 4) warn.push('BLOWN OUT — bloom/exposure clipping too much of frame');
-    if (stats.meanSat > 0.52) warn.push('OVERSATURATED — not the desaturated gothic palette');
-    if (stats.colorBuckets < 90) warn.push('FLAT PALETTE — too few distinct colors, reads untextured');
+    const m = computeMetrics(stats);
+    const warn = evaluateMetrics(m);
 
-    console.log(
-      `  ${i.name.padEnd(11)} mean=${String(stats.mean).padEnd(6)} sd=${String(stats.stdev).padEnd(6)} ` +
-      `p01=${String(stats.p01).padEnd(6)} p99=${String(stats.p99).padEnd(6)} ` +
-      `blk%=${String(stats.trueBlackPct).padEnd(5)} sat=${String(stats.meanSat).padEnd(6)} colors=${stats.colorBuckets}`
-    );
+    console.log(formatMetricsLine(i.name, m));
     for (const w of warn) console.log(`      ⚠  ${w}`);
     if (!warn.length) console.log('      ✓  objective value/color metrics in AAA range');
+    if (warn.length) outOfRange++;
   }
   console.log('');
+
+  if (check && outOfRange) {
+    console.log(`sheet: FAILED — ${outOfRange} of ${imgs.length} frame(s) out of range.\n`);
+    await browser.close();
+    process.exit(1);
+  }
+  if (check) console.log(`sheet: OK — all ${imgs.length} frames in range.`);
 }
 
 await browser.close();

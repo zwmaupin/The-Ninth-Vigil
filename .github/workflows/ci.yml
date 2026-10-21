@@ -33,6 +33,43 @@ jobs:
       # repos and asserts on the violations each one produces.
       - run: node tools/guard.test.mjs
 
+  # The pixel-diff gate. The repository already ships the "before" — eight
+  # committed PNGs in shots/ — and nothing compared a new capture against
+  # them, so "prove visual changes in pixels" was honour-system. This compares
+  # a fresh capture of each scenario against its committed baseline and fails
+  # when a frame moved more than the threshold, or when a metric crossed out
+  # of range.
+  #
+  # Runners have no GPU, so this renders through SwiftShader at a reduced
+  # resolution, and cross-machine pixel equality is not a property this
+  # project has or needs. So the gate is deliberately NOT "the frame must be
+  # identical to its baseline" — it is "the frame must not have moved much,
+  # and must still be in range", with the diff PNG attached for a human to
+  # look at. A stored hash would fail for the same reason the README
+  # describes: it collapses "the torch moved" and "everything is subtly
+  # wrong" into the same opaque string.
+  pixel-diff:
+    name: Pixel diff vs baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Diff against the committed baselines
+        run: node tools/diff.mjs --software --w=640 --h=360 --frames=45 --threshold=0.25
+      - name: Upload the diff images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-diffs
+          path: shots/_debug/diff/
+          if-no-files-found: ignore
+
   smoke:
     name: Boot + determinism
     runs-on: ubuntu-latest
