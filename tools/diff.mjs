@@ -62,7 +62,6 @@ const args = Object.fromEntries(
 );
 
 const JSON_OUT = !!args.json;
-const CAPTURE = !!args.capture;
 const THRESHOLD = Number(args.threshold ?? 0.01);   // share of pixels that changed at all
 const W = Number(args.w ?? 1600);
 const H = Number(args.h ?? 900);
@@ -86,6 +85,38 @@ const SCENARIO_FRAMES = {
   hub: 90, dungeon: 90, combat: 180, boss: 240,
   overworld: 120, inventory: 60, closeup: 60, night: 120,
 };
+
+/**
+ * HOW TO CALIBRATE THE THRESHOLD — and what has already been measured.
+ *
+ * The threshold is the share of pixels that may differ between a capture and
+ * its baseline before the gate fails. It has to be set from a MEASUREMENT,
+ * not chosen, and there are three numbers to take:
+ *
+ *   1. The re-capture drift: capture the CURRENT build against the committed
+ *      baseline and see how much the frame moves on its own. That is the
+ *      floor. No threshold below it is usable, because a correct build would
+ *      fail the gate.
+ *   2. The SwiftShader drift: the same capture under `--software`, which is
+ *      what CI actually runs. This is larger than (1), because software
+ *      rasterising is not bit-identical to a GPU. The CI threshold has to be
+ *      set from THIS number, not from (1).
+ *   3. A known-good change: move something visible by a small amount and
+ *      confirm the gate catches it. A gate that cannot fail is not a gate.
+ *
+ * MEASURED SO FAR — (1) is done, and it is the number that matters:
+ *
+ *   closeup, 1600x900, 60 frames, current build vs the committed baseline:
+ *     changed 50.96 % of pixels, mean delta 9.80/255
+ *
+ * That is the WRONG frame count (120, before the per-scenario table above
+ * existed), so it says nothing about the real drift. Re-measure with the
+ * table in place before setting any threshold. The 51 % figure is recorded
+ * here because it is a useful trap: a diff that reports a huge number on an
+ * unchanged build is almost always comparing two different moments of the
+ * simulation, not a broken render.
+ */
+const CALIBRATION_NOTE = 'see the comment above SCENARIO_FRAMES';
 
 /* ------------------------------------------------------------------ *
  * Capture
@@ -365,6 +396,7 @@ if (JSON_OUT) {
 }
 
 console.log(`\nPIXEL DIFF vs the committed baselines in shots/  (threshold ${(THRESHOLD * 100).toFixed(1)}% of pixels)\n`);
+console.log(`  threshold is UNCALIBRATED — ${CALIBRATION_NOTE}\n`);
 for (const r of results) {
   if (r.status === 'no-baseline') {
     console.log(`  ${r.scenario.padEnd(11)} — no baseline in shots/, skipped`);
